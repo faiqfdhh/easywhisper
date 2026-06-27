@@ -6,21 +6,29 @@ from pathlib import Path
 
 import srt
 from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFontComboBox,
+    QFormLayout,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTableWidget,
@@ -28,6 +36,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from src.export import burn_subtitles
 
 from src.pipeline import Result, transcribe_video
 from src.subtitles import write_srt
@@ -71,6 +81,32 @@ class _Worker(QObject):
             self.failed.emit(str(exc))
 
 
+class _ExportWorker(QObject):
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, video, srt_path, output, font_name, font_size, position):
+        super().__init__()
+        self._video = video
+        self._srt_path = srt_path
+        self._output = output
+        self._font_name = font_name
+        self._font_size = font_size
+        self._position = position
+
+    def run(self):
+        try:
+            result = burn_subtitles(
+                self._video, self._srt_path, self._output,
+                font_name=self._font_name,
+                font_size=self._font_size,
+                position=self._position,
+            )
+            self.done.emit(str(result))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -96,6 +132,8 @@ class MainWindow(QMainWindow):
         menu.addAction("Open Video\u2026").triggered.connect(self._open_video)
         menu.addAction("New Video").triggered.connect(self._go_home)
         menu.addAction("Save SRT\u2026").triggered.connect(self._save_srt)
+        menu.addAction("Export Video\u2026").triggered.connect(self._export_video)
+        self._export_action = menu.actions()[-1]
 
     # --- pages ---
 
@@ -319,13 +357,8 @@ class MainWindow(QMainWindow):
         self._go_home()
         QMessageBox.critical(self, "Transcription failed", message)
 
-    def _save_srt(self):
-        if self._stack.currentIndex() != 2:
-            return
-        path, _ = QFileDialog.getSaveFileName(self, "Save SRT", "subtitles.srt", "SubRip (*.srt)")
-        if not path:
-            return
-        subs = [
+    def _get_current_subtitles(self):
+        return [
             srt.Subtitle(
                 index=int(self._table.item(row, 0).text()),
                 start=srt.srt_timestamp_to_timedelta(self._table.item(row, 1).text()),
@@ -334,8 +367,98 @@ class MainWindow(QMainWindow):
             )
             for row in range(self._table.rowCount())
         ]
-        write_srt(Path(path), subs)
+
+    def _save_srt(self):
+        if self._stack.currentIndex() != 2:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save SRT", "subtitles.srt", "SubRip (*.srt)")
+        if not path:
+            return
+        write_srt(Path(path), self._get_current_subtitles())
         self.statusBar().showMessage(f"Saved {path}", 5000)
+
+    def _export_video(self):
+        if self._stack.currentIndex() != 2:
+            return
+        video_path = Path(self._player.source().toLocalFile())
+        if not video_path.is_file():
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Video")
+
+        font_combo = QFontComboBox()
+        font_combo.setCurrentFont(QFont("Arial"))
+
+        size_spin = QSpinBox()
+        size_spin.setRange(8, 72)
+        size_spin.setValue(16)
+
+        pos_combo = QComboBox()
+        pos_combo.addItems(["Bottom", "Top"])
+
+        default_out = video_path.with_name(video_path.stem + "_subtitled.mp4")
+        output_edit = QLineEdit(str(default_out))
+        browse_btn = QPushButton("Browse...")
+        def browse():
+            p, _ = QFileDialog.getSaveFileName(dialog, "Save Video", str(default_out), "MP4 (*.mp4)")
+            if p:
+                output_edit.setText(p)
+        browse_btn.clicked.connect(browse)
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(output_edit, 1)
+        path_layout.addWidget(browse_btn)
+
+        form = QFormLayout(dialog)
+        form.addRow("Font:", font_combo)
+        form.addRow("Size:", size_spin)
+        form.addRow("Position:", pos_combo)
+        form.addRow("Output:", path_layout)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        form.addRow(btn_box)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        output_path = Path(output_edit.text())
+        font_name = font_combo.currentFont().family()
+        font_size = size_spin.value()
+        position = pos_combo.currentText().lower()
+
+        srt_path = self._working_root / "export_temp.srt"
+        srt_path.parent.mkdir(parents=True, exist_ok=True)
+        write_srt(srt_path, self._get_current_subtitles())
+
+        self._export_thread = QThread(self)
+        self._export_worker = _ExportWorker(
+            video_path, srt_path, output_path,
+            font_name=font_name,
+            font_size=font_size,
+            position=position,
+        )
+        self._export_worker.moveToThread(self._export_thread)
+        self._export_thread.started.connect(self._export_worker.run)
+        self._export_worker.done.connect(self._on_export_done)
+        self._export_worker.failed.connect(self._on_export_failed)
+        self._export_worker.done.connect(self._export_thread.quit)
+        self._export_worker.failed.connect(self._export_thread.quit)
+        self._export_thread.start()
+
+        self._export_action.setEnabled(False)
+        self.statusBar().showMessage("Exporting video...")
+
+    def _on_export_done(self, path):
+        self._export_action.setEnabled(True)
+        self.statusBar().showMessage(f"Exported {path}", 8000)
+
+    def _on_export_failed(self, message):
+        self._export_action.setEnabled(True)
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "Export failed", message)
 
 
 def main() -> int:
