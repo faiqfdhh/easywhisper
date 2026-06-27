@@ -12,7 +12,7 @@ Result = namedtuple("Result", "video srt subtitles")
 
 
 def extract_audio(video_path: Path, audio_path: Path, ffmpeg: str = "ffmpeg") -> Path:
-    """Extract 16 kHz mono WAV (what Whisper expects) via ffmpeg."""
+    """Extract 16 kHz mono WAV for Whisper using ffmpeg."""
     cmd = [ffmpeg, "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(audio_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

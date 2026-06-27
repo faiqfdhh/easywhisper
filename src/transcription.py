@@ -1,4 +1,4 @@
-"""faster-whisper engine. Lazy import keeps the heavy dep off other modules."""
+"""faster-whisper engine with lazy import."""
 from __future__ import annotations
 
 from datetime import timedelta

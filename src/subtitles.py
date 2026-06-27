@@ -1,4 +1,4 @@
-"""SRT read/write. The cue model is srt.Subtitle; this is the whole module."""
+"""Read and write SRT files using the srt library."""
 from __future__ import annotations
 
 from pathlib import Path

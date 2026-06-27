@@ -1,4 +1,4 @@
-"""PySide6 UI (player + editor + window) and entry point. No business logic."""
+"""PySide6 UI and entry point."""
 from __future__ import annotations
 
 import sys
@@ -9,6 +9,7 @@ from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -106,7 +107,7 @@ class MainWindow(QMainWindow):
 
         desc = QLabel(
             "Transcribe video into editable subtitles.\n"
-            "Runs locally \u2014 no uploads, no API keys."
+            "Runs locally. No uploads, no API keys."
         )
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -173,31 +174,44 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
         self._player.positionChanged.connect(self._on_position)
 
-        left = QWidget(self)
-        lv = QVBoxLayout(left)
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
         new_btn = QPushButton("New Video")
         new_btn.clicked.connect(self._go_home)
-        lv.addWidget(new_btn)
-        lv.addWidget(video, 1)
+        top_layout.addWidget(new_btn)
+        top_layout.addWidget(video, 1)
         controls = QHBoxLayout()
         controls.addWidget(self._play)
         controls.addWidget(self._slider)
-        lv.addLayout(controls)
+        top_layout.addLayout(controls)
 
-        self._table = QTableWidget(0, 4, self)
+        self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Start", "End", "Text"])
+        self._table.setAlternatingRowColors(True)
+        self._table.setWordWrap(True)
+        self._table.setStyleSheet("""
+            QTableWidget::item:selected {
+                background-color: #4CAF50;
+                color: white;
+            }
+        """)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.cellClicked.connect(self._seek_to_row)
 
-        split = QSplitter(Qt.Orientation.Horizontal, self)
-        split.addWidget(left)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(top)
         split.addWidget(self._table)
         split.setStretchFactor(0, 2)
+        split.setStretchFactor(1, 3)
 
         page = QWidget()
-        hl = QHBoxLayout(page)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.addWidget(split)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(split)
         return page
 
     # --- navigation ---
@@ -225,6 +239,9 @@ class MainWindow(QMainWindow):
             end = srt.srt_timestamp_to_timedelta(self._table.item(row, 2).text()).total_seconds()
             if start <= seconds < end:
                 self._table.selectRow(row)
+                self._table.scrollToItem(
+                    self._table.item(row, 0), QAbstractItemView.ScrollHint.PositionAtCenter
+                )
                 return
 
     def _seek_to_row(self, row, _column):
