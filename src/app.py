@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -93,6 +94,7 @@ class MainWindow(QMainWindow):
 
         menu = self.menuBar().addMenu("&File")
         menu.addAction("Open Video\u2026").triggered.connect(self._open_video)
+        menu.addAction("New Video").triggered.connect(self._go_home)
         menu.addAction("Save SRT\u2026").triggered.connect(self._save_srt)
 
     # --- pages ---
@@ -174,13 +176,28 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
         self._player.positionChanged.connect(self._on_position)
 
+        overlay = QLabel(self)
+        overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay.setWordWrap(True)
+        overlay.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 160);
+            color: white;
+            font-size: 18px;
+            padding: 8px 20px;
+        """)
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._subtitle_label = overlay
+
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(video, 0, 0)
+        grid.addWidget(self._subtitle_label, 0, 0, Qt.AlignmentFlag.AlignBottom)
+
         top = QWidget()
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        new_btn = QPushButton("New Video")
-        new_btn.clicked.connect(self._go_home)
-        top_layout.addWidget(new_btn)
-        top_layout.addWidget(video, 1)
+        top_layout.addWidget(container, 1)
         controls = QHBoxLayout()
         controls.addWidget(self._play)
         controls.addWidget(self._slider)
@@ -205,8 +222,8 @@ class MainWindow(QMainWindow):
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(top)
         split.addWidget(self._table)
-        split.setStretchFactor(0, 2)
-        split.setStretchFactor(1, 3)
+        split.setStretchFactor(0, 6)
+        split.setStretchFactor(1, 1)
 
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -234,6 +251,7 @@ class MainWindow(QMainWindow):
     def _on_position(self, position_ms):
         self._slider.setValue(position_ms)
         seconds = position_ms / 1000
+        found = False
         for row in range(self._table.rowCount()):
             start = srt.srt_timestamp_to_timedelta(self._table.item(row, 1).text()).total_seconds()
             end = srt.srt_timestamp_to_timedelta(self._table.item(row, 2).text()).total_seconds()
@@ -242,7 +260,11 @@ class MainWindow(QMainWindow):
                 self._table.scrollToItem(
                     self._table.item(row, 0), QAbstractItemView.ScrollHint.PositionAtCenter
                 )
-                return
+                self._subtitle_label.setText(self._table.item(row, 3).text())
+                found = True
+                break
+        if not found:
+            self._subtitle_label.clear()
 
     def _seek_to_row(self, row, _column):
         start = srt.srt_timestamp_to_timedelta(self._table.item(row, 1).text())
