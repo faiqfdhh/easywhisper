@@ -84,22 +84,9 @@ Working copies and intermediate files are stored in a `work/` folder in the curr
 
 ## Models
 
-| Size  | Parameters | English-only | Multilingual | Required VRAM | Speed |
-|-------|-----------|-------------|-------------|---------------|-------|
-| tiny  | 39 M      | tiny.en     | tiny        | ~1 GB         | ~10x  |
-| base  | 74 M      | base.en     | base        | ~1 GB         | ~7x   |
-| small | 244 M     | small.en    | small       | ~2 GB         | ~4x   |
-| medium| 769 M     | medium.en   | medium      | ~5 GB         | ~2x   |
-| large | 1550 M    | --          | large       | ~10 GB        | 1x    |
-| turbo | 809 M     | --          | turbo       | ~6 GB         | ~8x   |
+To deliver the best possible user experience without complex setups, EasyWhisper is optimized to use the **turbo** model (containing 809 million parameters). 
 
-**Recommendations:**
-- **tiny / base** — quick tests, real-time use, low-resource hardware.
-- **small** — good default, balanced speed and accuracy.
-- **medium / large** — best accuracy, needs significant VRAM.
-- **turbo** — best value, near-large quality at ~8x speed.
-
-The `.en` variants are optimized for English-only transcription and perform better for that use case.
+The `turbo` model provides near-large quality at roughly 8x transcription speed, making it the ideal choice for local, high-quality transcription on modern hardware (requiring ~6 GB of VRAM). The app handles all model setups automatically, meaning there are no manual size selections required.
 
 ---
 

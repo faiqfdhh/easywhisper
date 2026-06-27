@@ -276,10 +276,6 @@ class _TranscriptionConfigDialog(QDialog):
         separator = _separator_widget()
         layout.addWidget(separator)
 
-        self._status_label = QLabel()
-        self._status_label.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; padding: 4px 0;")
-        layout.addWidget(self._status_label)
-
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -322,9 +318,6 @@ class _TranscriptionConfigDialog(QDialog):
         layout.addLayout(btn_layout)
 
 
-
-    def set_status(self, html: str):
-        self._status_label.setText(html)
 
     def model_size(self) -> str:
         return "turbo"
@@ -437,6 +430,7 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction("System Check\u2026").triggered.connect(self._show_setup_dialog)
+        help_menu.addAction("About\u2026").triggered.connect(self._show_about_dialog)
 
         QCoreApplication.instance().aboutToQuit.connect(self._on_quit)
 
@@ -599,29 +593,29 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
         self._player.positionChanged.connect(self._on_position)
 
-        overlay = QLabel(video)
-        overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        overlay.setWordWrap(True)
-        overlay.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 140);
-            color: white;
-            font-size: 14pt;
-            font-weight: 400;
-            padding: 8px 20px;
+        self._subtitle_label = QLabel("")
+        self._subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._subtitle_label.setWordWrap(True)
+        self._subtitle_label.setMinimumHeight(80)
+        self._subtitle_label.setStyleSheet(f"""
+            background-color: {Theme.BG_PAGE};
+            color: {Theme.TEXT_PRIMARY};
+            font-size: 16pt;
+            font-weight: 600;
+            padding: 12px 20px;
+            border-top: 1px solid {Theme.BORDER};
+            border-bottom: 1px solid {Theme.BORDER};
         """)
-        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._subtitle_label = overlay
-
-        video_layout = QVBoxLayout(video)
-        video_layout.setContentsMargins(0, 0, 0, 30)
-        video_layout.addStretch()
-        video_layout.addWidget(self._subtitle_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
         top_layout.addWidget(video, 1)
+        top_layout.addWidget(self._subtitle_label, 0)
+        
         controls = QHBoxLayout()
+        controls.setContentsMargins(12, 12, 12, 12)
         controls.addWidget(self._play)
         controls.addWidget(self._slider)
 
@@ -685,10 +679,16 @@ class MainWindow(QMainWindow):
         split.addWidget(self._table)
         split.setStretchFactor(0, 6)
         split.setStretchFactor(1, 1)
+        split.setHandleWidth(8)
         split.setStyleSheet(f"""
             QSplitter::handle {{
-                background: {Theme.BORDER};
-                height: 2px;
+                background: {Theme.BG_PAGE};
+                border-top: 1px solid {Theme.BORDER};
+                border-bottom: 1px solid {Theme.BORDER};
+                height: 8px;
+            }}
+            QSplitter::handle:hover {{
+                background: {Theme.BORDER_ACCENT};
             }}
         """)
 
@@ -904,13 +904,6 @@ class MainWindow(QMainWindow):
         dialog = _TranscriptionConfigDialog(self)
         checks = check_all()
         critical_failures = [c for c in checks if not c["ok"] and c["name"] != "faster-whisper"]
-        status_parts = []
-        for c in checks:
-            if c["ok"]:
-                status_parts.append(f'<span style="color:{Theme.TEXT_SUCCESS}">\u2713 {c["name"]}</span>')
-            else:
-                status_parts.append(f'<span style="color:{Theme.TEXT_ERROR}">\u2717 {c["name"]}</span>')
-        dialog.set_status("  ".join(status_parts))
 
         if critical_failures:
             names = [c["name"] for c in critical_failures]
@@ -1227,9 +1220,7 @@ class MainWindow(QMainWindow):
         checks = check_all()
         failures = [c for c in checks if not c["ok"]]
         if not failures:
-            self._welcome_status.setText("System ready \u2713")
-            self._welcome_status.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_SUCCESS}; border: none; margin-top: 8px;")
-            return
+                return
         names = [c["name"] for c in failures]
         self._welcome_status.setText(f"Setup issue: {', '.join(names)} \u2717  (Help \u2192 System Check)")
         self._welcome_status.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_ERROR}; border: none; margin-top: 8px;")
@@ -1244,6 +1235,65 @@ class MainWindow(QMainWindow):
 
     def _on_quit(self):
         self._settings.sync()
+
+    def _show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About EasyWhisper")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet(f"QDialog {{ background: {Theme.BG_SURFACE}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(32, 32, 32, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("EasyWhisper")
+        title.setStyleSheet(f"font-size: 24pt; font-weight: 800; color: {Theme.TEXT_PRIMARY}; border: none; letter-spacing: -0.5px;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "A minimal desktop app that transcribes video into editable SRT "
+            "subtitles using a local faster-whisper model. Transcription runs "
+            "fully locally with no API keys and no cloud calls."
+        )
+        desc.setWordWrap(True)
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc.setStyleSheet(f"font-size: {Theme.FONT_MD}; color: {Theme.TEXT_SECONDARY}; border: none; line-height: 1.5;")
+        layout.addWidget(desc)
+
+        layout.addSpacing(8)
+
+        credit = QLabel("Created by Muhammad Faiq Fadhlullah")
+        credit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        credit.setStyleSheet(f"font-size: {Theme.FONT_MD}; color: {Theme.TEXT_MUTED}; border: none;")
+        layout.addWidget(credit)
+
+        version = QLabel("Version 0.1.0")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        version.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; border: none;")
+        layout.addWidget(version)
+
+        layout.addStretch()
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 28px;
+                border: none;
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+                font-size: {Theme.FONT_MD};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Theme.BG_ACCENT_HOVER}; }}
+        """)
+        ok_btn.clicked.connect(dialog.accept)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        dialog.exec()
 
 
 def main() -> int:
