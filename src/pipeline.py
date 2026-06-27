@@ -20,20 +20,29 @@ def extract_audio(video_path: Path, audio_path: Path, ffmpeg: str = "ffmpeg") ->
     return audio_path
 
 
-def transcribe_video(video_path, engine, working_root, *, audio_extractor=extract_audio) -> Result:
+def transcribe_video(video_path, engine, working_root, *, audio_extractor=extract_audio, progress_callback=None) -> Result:
     """engine: any object with .transcribe(audio_path) -> list[srt.Subtitle]."""
+    def _report(stage, pct):
+        if progress_callback:
+            progress_callback(stage, pct)
+
     video_path = Path(video_path)
     work = Path(working_root) / video_path.stem
     work.mkdir(parents=True, exist_ok=True)
+    _report("Copying video...", 15)
 
     video = work / video_path.name
     shutil.copy2(video_path, video)
+    _report("Extracting audio...", 30)
 
     audio = work / (video.stem + ".wav")
     audio_extractor(video, audio)
+    _report("Transcribing...", 65)
 
     subtitles = engine.transcribe(audio)
+    _report("Writing subtitles...", 90)
 
     srt_path = work / (video.stem + ".srt")
     write_srt(srt_path, subtitles)
+    _report("Done", 100)
     return Result(video, srt_path, subtitles)

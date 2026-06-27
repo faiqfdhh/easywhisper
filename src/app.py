@@ -13,11 +13,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSlider,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -29,20 +32,39 @@ from src.subtitles import write_srt
 from src.transcription import FasterWhisperEngine
 
 
+class _CancelledError(Exception):
+    pass
+
+
 class _Worker(QObject):
     """Runs the pipeline off the UI thread."""
 
-    done = Signal(object)   # Result
+    done = Signal(object)
     failed = Signal(str)
+    progress = Signal(str, int)
 
     def __init__(self, video: Path, working_root: Path):
         super().__init__()
         self._video = video
         self._working_root = working_root
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
 
     def run(self):
         try:
-            self.done.emit(transcribe_video(self._video, FasterWhisperEngine(), self._working_root))
+            def on_progress(stage, pct):
+                self.progress.emit(stage, pct)
+                if self._cancel_requested:
+                    raise _CancelledError()
+            result = transcribe_video(
+                self._video, FasterWhisperEngine(), self._working_root,
+                progress_callback=on_progress,
+            )
+            self.done.emit(result)
+        except _CancelledError:
+            pass
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -55,7 +77,91 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
 
-        # --- player (left) ---
+        self._stack = QStackedWidget(self)
+        self.setCentralWidget(self._stack)
+
+        self._welcome_page = self._build_welcome()
+        self._processing_page = self._build_processing()
+        self._editor_page = self._build_editor()
+
+        self._stack.addWidget(self._welcome_page)
+        self._stack.addWidget(self._processing_page)
+        self._stack.addWidget(self._editor_page)
+
+        self._stack.setCurrentIndex(0)
+
+        menu = self.menuBar().addMenu("&File")
+        menu.addAction("Open Video\u2026").triggered.connect(self._open_video)
+        menu.addAction("Save SRT\u2026").triggered.connect(self._save_srt)
+
+    # --- pages ---
+
+    def _build_welcome(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel("Whisper Subtitle Studio")
+        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+
+        desc = QLabel(
+            "Transcribe video into editable subtitles.\n"
+            "Runs locally \u2014 no uploads, no API keys."
+        )
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        steps = QLabel(
+            "\u2003\u2460 Pick a video file\n"
+            "\u2003\u2461 Auto-transcribe\n"
+            "\u2003\u2462 Edit timestamps and text\n"
+            "\u2003\u2463 Save SRT"
+        )
+        steps.setStyleSheet("line-height: 1.6;")
+
+        btn = QPushButton("Choose Video")
+        btn.setMinimumHeight(44)
+        btn.clicked.connect(self._open_video)
+
+        layout.addStretch()
+        layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(8)
+        layout.addWidget(desc, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(24)
+        layout.addWidget(steps, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(32)
+        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+
+        return page
+
+    def _build_processing(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._progress_label = QLabel("Starting\u2026")
+        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._progress_label.setStyleSheet("font-size: 16px;")
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedWidth(400)
+
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self._cancel_transcription)
+
+        layout.addStretch()
+        layout.addWidget(self._progress_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(12)
+        layout.addWidget(self._progress_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(16)
+        layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+
+        return page
+
+    def _build_editor(self):
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(QAudioOutput(self))
         video = QVideoWidget(self)
@@ -69,13 +175,15 @@ class MainWindow(QMainWindow):
 
         left = QWidget(self)
         lv = QVBoxLayout(left)
+        new_btn = QPushButton("New Video")
+        new_btn.clicked.connect(self._go_home)
+        lv.addWidget(new_btn)
         lv.addWidget(video, 1)
         controls = QHBoxLayout()
         controls.addWidget(self._play)
         controls.addWidget(self._slider)
         lv.addLayout(controls)
 
-        # --- editor (right) ---
         self._table = QTableWidget(0, 4, self)
         self._table.setHorizontalHeaderLabels(["#", "Start", "End", "Text"])
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -85,13 +193,22 @@ class MainWindow(QMainWindow):
         split.addWidget(left)
         split.addWidget(self._table)
         split.setStretchFactor(0, 2)
-        self.setCentralWidget(split)
 
-        menu = self.menuBar().addMenu("&File")
-        menu.addAction("Open Video\u2026").triggered.connect(self._open_video)
-        menu.addAction("Save SRT\u2026").triggered.connect(self._save_srt)
+        page = QWidget()
+        hl = QHBoxLayout(page)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(split)
+        return page
+
+    # --- navigation ---
+
+    def _go_home(self):
+        self._player.setSource(QUrl())
+        self._table.setRowCount(0)
+        self._stack.setCurrentIndex(0)
 
     # --- player handlers ---
+
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
@@ -115,22 +232,39 @@ class MainWindow(QMainWindow):
         self._player.setPosition(int(start.total_seconds() * 1000))
 
     # --- pipeline ---
+
     def _open_video(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Video", "", "Video (*.mp4 *.mkv *.mov *.avi *.webm);;All (*)"
         )
         if not path:
             return
-        self.statusBar().showMessage("Transcribing\u2026 this may take a while.")
+        self._start_transcription(Path(path))
+
+    def _start_transcription(self, video: Path):
+        self._stack.setCurrentIndex(1)
+        self._progress_bar.setValue(0)
+        self._progress_label.setText("Starting\u2026")
+
         self._thread = QThread(self)
-        self._worker = _Worker(Path(path), self._working_root)
+        self._worker = _Worker(video, self._working_root)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_done)
         self._worker.failed.connect(self._on_failed)
         self._worker.done.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
         self._thread.start()
+
+    def _cancel_transcription(self):
+        if self._worker:
+            self._worker.cancel()
+        self._go_home()
+
+    def _on_progress(self, stage: str, pct: int):
+        self._progress_label.setText(stage)
+        self._progress_bar.setValue(pct)
 
     def _on_done(self, result: Result):
         self._player.setSource(QUrl.fromLocalFile(str(result.video)))
@@ -140,13 +274,15 @@ class MainWindow(QMainWindow):
             self._table.setItem(row, 1, QTableWidgetItem(srt.timedelta_to_srt_timestamp(sub.start)))
             self._table.setItem(row, 2, QTableWidgetItem(srt.timedelta_to_srt_timestamp(sub.end)))
             self._table.setItem(row, 3, QTableWidgetItem(sub.content))
-        self.statusBar().showMessage(f"Done. SRT at {result.srt}", 5000)
+        self._stack.setCurrentIndex(2)
 
     def _on_failed(self, message):
-        self.statusBar().clearMessage()
+        self._go_home()
         QMessageBox.critical(self, "Transcription failed", message)
 
     def _save_srt(self):
+        if self._stack.currentIndex() != 2:
+            return
         path, _ = QFileDialog.getSaveFileName(self, "Save SRT", "subtitles.srt", "SubRip (*.srt)")
         if not path:
             return
