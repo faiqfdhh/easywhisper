@@ -30,7 +30,7 @@ def test_burn_subtitles_defaults():
     assert args[i + 1] == str(video)
     assert "-vf" in args
     vf = args[args.index("-vf") + 1]
-    assert "subtitles=" + str(srt) in vf
+    assert "subtitles=" + srt.as_posix() in vf
     assert "FontName=Arial" in vf
     assert "FontSize=16" in vf
     assert "Alignment=2" in vf
@@ -56,6 +56,27 @@ def test_burn_subtitles_custom():
     assert "FontName=Courier New" in vf
     assert "FontSize=24" in vf
     assert "Alignment=8" in vf
+
+
+def test_burn_subtitles_windows_path():
+    from src.export import burn_subtitles
+
+    video = Path("C:/Users/me/video.mp4")
+    srt = Path("C:/Users/me/sub.srt")
+    output = Path("C:/Users/me/out.mp4")
+
+    with patch("src.export.subprocess.run", side_effect=_fake_run) as mock:
+        burn_subtitles(video, srt, output)
+
+    vf = mock.call_args[0][0][mock.call_args[0][0].index("-vf") + 1]
+    assert "subtitles=C\\:/Users/me/sub.srt" in vf
+
+
+def test_burn_subtitles_invalid_position():
+    from src.export import burn_subtitles
+
+    with pytest.raises(ValueError, match="position"):
+        burn_subtitles(Path("/v.mp4"), Path("/v.srt"), Path("/v/o.mp4"), position="center")
 
 
 def test_burn_subtitles_failure():
