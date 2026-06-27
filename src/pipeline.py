@@ -4,11 +4,16 @@ from __future__ import annotations
 import shutil
 import subprocess
 from collections import namedtuple
+from datetime import datetime
 from pathlib import Path
 
 from src.subtitles import write_srt
 
 Result = namedtuple("Result", "video srt subtitles")
+
+
+def _log(msg: str):
+    print(f"[{datetime.now():%H:%M:%S}] {msg}")
 
 
 def extract_audio(video_path: Path, audio_path: Path, ffmpeg: str = "ffmpeg") -> Path:
@@ -29,20 +34,28 @@ def transcribe_video(video_path, engine, working_root, *, audio_extractor=extrac
     video_path = Path(video_path)
     work = Path(working_root) / video_path.stem
     work.mkdir(parents=True, exist_ok=True)
-    _report("Copying video...", 15)
 
+    _report("Copying video...", 15)
+    _log("Copying video to working directory...")
     video = work / video_path.name
     shutil.copy2(video_path, video)
-    _report("Extracting audio...", 30)
+    _log(f"  Copied to {video}")
 
+    _report("Extracting audio...", 30)
+    _log("Extracting audio (16 kHz mono WAV)...")
     audio = work / (video.stem + ".wav")
     audio_extractor(video, audio)
+    _log(f"  Audio extracted: {audio}")
+
     _report("Transcribing...", 65)
-
+    _log("Transcribing with Whisper...")
     subtitles = engine.transcribe(audio)
-    _report("Writing subtitles...", 90)
 
+    _report("Writing subtitles...", 90)
+    _log(f"Writing {len(subtitles)} subtitles to SRT...")
     srt_path = work / (video.stem + ".srt")
     write_srt(srt_path, subtitles)
+
     _report("Done", 100)
+    _log(f"Done - output: {srt_path}")
     return Result(video, srt_path, subtitles)

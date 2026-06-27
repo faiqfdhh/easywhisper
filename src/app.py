@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import srt
 
 _FONT_PATH = Path(__file__).parent / "fonts" / "Raleway-VariableFont_wght.ttf"
 _VIDEO_EXTS = frozenset({".mp4", ".mkv", ".mov", ".avi", ".webm"})
-from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QSettings, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -41,10 +42,46 @@ from PySide6.QtWidgets import (
 )
 
 from src.export import burn_subtitles
-
+from src.models import MODEL_SPECS, SORTED_LANGUAGES
 from src.pipeline import Result, transcribe_video
+from src.setup import check_all
 from src.subtitles import write_srt
 from src.transcription import FasterWhisperEngine
+
+_SETTINGS_ORG = "easywhisper"
+_SETTINGS_APP = "whisper-subtitle-studio"
+
+
+def _log(msg: str):
+    print(f"[{datetime.now():%H:%M:%S}] {msg}")
+
+
+class Theme:
+    BG_PAGE = "#f8f8f6"
+    BG_SURFACE = "#ffffff"
+    BG_HOVER = "#f0efeb"
+    BG_ACCENT = "#059669"
+    BG_ACCENT_HOVER = "#047857"
+    BG_ACCENT_MUTED = "#ecfdf5"
+    BG_TABLE_ALT = "#fafaf9"
+    TEXT_PRIMARY = "#1c1917"
+    TEXT_SECONDARY = "#57534e"
+    TEXT_MUTED = "#a8a29e"
+    TEXT_WHITE = "#ffffff"
+    TEXT_SUCCESS = "#16a34a"
+    TEXT_ERROR = "#dc2626"
+    BORDER = "#e7e5e4"
+    BORDER_LIGHT = "#f0efeb"
+    BORDER_ACCENT = "#059669"
+    RADIUS = "6px"
+    RADIUS_LG = "8px"
+    RADIUS_XL = "24px"
+    FONT_XS = "11px"
+    FONT_SM = "12px"
+    FONT_MD = "13px"
+    FONT_LG = "14px"
+    FONT_XL = "18px"
+    FONT_2XL = "24px"
 
 
 class _CancelledError(Exception):
@@ -58,10 +95,12 @@ class _Worker(QObject):
     failed = Signal(str)
     progress = Signal(str, int)
 
-    def __init__(self, video: Path, working_root: Path):
+    def __init__(self, video: Path, working_root: Path, model_size: str, language: str | None):
         super().__init__()
         self._video = video
         self._working_root = working_root
+        self._model_size = model_size
+        self._language = language
         self._cancel_requested = False
 
     def cancel(self):
@@ -69,12 +108,26 @@ class _Worker(QObject):
 
     def run(self):
         try:
+            spec = MODEL_SPECS.get(self._model_size, {})
+            lang_label = self._language or "auto-detect"
+            _log("Starting transcription")
+            _log(f"  Video:   {self._video.name}")
+            _log(f"  Model:   {self._model_size} ({spec.get('parameters', '?')} params, {spec.get('speed', '?')} speed)")
+            _log(f"  Lang:    {lang_label}")
+            _log(f"  Device:  cpu  Compute: int8")
+
             def on_progress(stage, pct):
+                if pct % 5 == 0 or "Done" in stage:
+                    _log(f"  [{pct:3d}%] {stage}")
                 self.progress.emit(stage, pct)
                 if self._cancel_requested:
                     raise _CancelledError()
+            engine = FasterWhisperEngine(
+                model_size=self._model_size,
+                language=self._language,
+            )
             result = transcribe_video(
-                self._video, FasterWhisperEngine(), self._working_root,
+                self._video, engine, self._working_root,
                 progress_callback=on_progress,
             )
             self.done.emit(result)
@@ -110,16 +163,309 @@ class _ExportWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _TranscriptionConfigDialog(QDialog):
+    """Dialog for selecting model size and language before transcription."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Transcription Settings")
+        self.setMinimumWidth(520)
+        self.setModal(True)
+        self.setStyleSheet(f"""
+            _TranscriptionConfigDialog {{
+                background: {Theme.BG_SURFACE};
+            }}
+        """)
+
+        self._selected_model = "base"
+        self._selected_language: str | None = None
+
+        self._build_ui()
+        self._populate_model_details()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(28, 24, 28, 24)
+
+        title = QLabel("Transcription Settings")
+        title.setStyleSheet(
+            f"font-size: {Theme.FONT_XL}; font-weight: 700; color: {Theme.TEXT_PRIMARY}; letter-spacing: -0.3px;"
+        )
+        layout.addWidget(title)
+
+        model_section = QVBoxLayout()
+        model_section.setSpacing(8)
+
+        model_label = QLabel("Model")
+        model_label.setStyleSheet(
+            f"font-size: {Theme.FONT_XS}; font-weight: 600; color: {Theme.TEXT_MUTED}; "
+            "text-transform: uppercase; letter-spacing: 0.5px;"
+        )
+        model_section.addWidget(model_label)
+
+        self._model_combo = QComboBox()
+        for key, spec in MODEL_SPECS.items():
+            label = f"{key} ({spec['parameters']} params, {spec['speed']} speed)"
+            self._model_combo.addItem(label, key)
+        self._model_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_LG};
+                min-height: 20px;
+            }}
+            QComboBox:hover {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 28px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                selection-background-color: {Theme.BG_ACCENT};
+                selection-color: {Theme.TEXT_WHITE};
+                border: 1px solid {Theme.BORDER};
+                outline: none;
+            }}
+        """)
+        self._model_combo.currentIndexChanged.connect(self._populate_model_details)
+        model_section.addWidget(self._model_combo)
+
+        self._model_details = QLabel()
+        self._model_details.setWordWrap(True)
+        self._model_details.setStyleSheet(f"""
+            background: {Theme.BG_PAGE};
+            border: 1px solid {Theme.BORDER};
+            border-radius: {Theme.RADIUS_LG};
+            padding: 12px 16px;
+            font-size: {Theme.FONT_MD};
+            color: {Theme.TEXT_SECONDARY};
+            line-height: 1.5;
+        """)
+        model_section.addWidget(self._model_details)
+
+        layout.addLayout(model_section)
+
+        lang_section = QVBoxLayout()
+        lang_section.setSpacing(8)
+
+        lang_label = QLabel("Language")
+        lang_label.setStyleSheet(
+            f"font-size: {Theme.FONT_XS}; font-weight: 600; color: {Theme.TEXT_MUTED}; "
+            "text-transform: uppercase; letter-spacing: 0.5px;"
+        )
+        lang_section.addWidget(lang_label)
+
+        self._lang_combo = QComboBox()
+        self._lang_combo.setEditable(True)
+        self._lang_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._lang_combo.setPlaceholderText("Type to filter or select a language...")
+        self._lang_combo.addItem("Auto-detect (default)", None)
+        self._lang_combo.insertSeparator(1)
+        for code, name in SORTED_LANGUAGES:
+            self._lang_combo.addItem(f"{name} ({code})", code)
+        self._lang_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_LG};
+                min-height: 20px;
+            }}
+            QComboBox:hover {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 28px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                selection-background-color: {Theme.BG_ACCENT};
+                selection-color: {Theme.TEXT_WHITE};
+                border: 1px solid {Theme.BORDER};
+                outline: none;
+            }}
+        """)
+        lang_section.addWidget(self._lang_combo)
+
+        lang_hint = QLabel("Specifying a language can improve transcription accuracy")
+        lang_hint.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; margin-top: -2px;")
+        lang_section.addWidget(lang_hint)
+
+        layout.addLayout(lang_section)
+
+        separator = _separator_widget()
+        layout.addWidget(separator)
+
+        self._status_label = QLabel()
+        self._status_label.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; padding: 4px 0;")
+        layout.addWidget(self._status_label)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 10px 24px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS_LG};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_SECONDARY};
+                font-size: {Theme.FONT_LG};
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_HOVER};
+            }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        self._start_btn = QPushButton("Start Transcription")
+        self._start_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 10px 28px;
+                border: none;
+                border-radius: {Theme.RADIUS_LG};
+                background: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+                font-size: {Theme.FONT_LG};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_ACCENT_HOVER};
+            }}
+        """)
+        self._start_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self._start_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _populate_model_details(self):
+        idx = self._model_combo.currentIndex()
+        key = self._model_combo.itemData(idx)
+        spec = MODEL_SPECS[key]
+
+        variant_parts = [
+            f"English-only: {spec['en_only']}" if spec["en_only"] else "English-only: \u2014",
+            f"Multilingual: {spec['multilingual']}",
+        ]
+
+        html = (
+            f'<div style="display: flex; gap: 16px; margin-bottom: 8px;">'
+            f'  <span><strong>{spec["parameters"]}</strong> params</span>'
+            f'  <span><strong>{spec["vram"]}</strong> VRAM</span>'
+            f'  <span><strong>{spec["speed"]}</strong> relative speed</span>'
+            f'</div>'
+            f'<div style="color: {Theme.TEXT_SECONDARY}; margin-bottom: 6px;">{spec["description"]}</div>'
+            f'<div style="font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED};">{" &middot; ".join(variant_parts)}</div>'
+        )
+        self._model_details.setText(html)
+
+    def set_status(self, html: str):
+        self._status_label.setText(html)
+
+    def model_size(self) -> str:
+        idx = self._model_combo.currentIndex()
+        return self._model_combo.itemData(idx)
+
+    def language(self) -> str | None:
+        idx = self._lang_combo.currentIndex()
+        return self._lang_combo.itemData(idx)
+
+
+def _separator_widget() -> QWidget:
+    sep = QWidget()
+    sep.setFixedHeight(1)
+    sep.setStyleSheet(f"background: {Theme.BORDER};")
+    return sep
+
+
+class _SetupDialog(QDialog):
+    """Shows dependency check results."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("System Check")
+        self.setMinimumWidth(460)
+        self.setModal(True)
+        self.setStyleSheet(f"_SetupDialog {{ background: {Theme.BG_SURFACE}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        title = QLabel("System Check")
+        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {Theme.TEXT_PRIMARY};")
+        layout.addWidget(title)
+
+        self._checks = check_all()
+        all_ok = True
+        for c in self._checks:
+            row = QHBoxLayout()
+            icon_color = Theme.TEXT_SUCCESS if c["ok"] else Theme.TEXT_ERROR
+            icon = QLabel("\u2713" if c["ok"] else "\u2717")
+            icon.setStyleSheet(
+                f"font-size: 16px; color: {icon_color}; font-weight: bold;"
+            )
+            name = QLabel(c["name"])
+            name.setStyleSheet(f"font-size: {Theme.FONT_MD}; font-weight: 600; color: {Theme.TEXT_PRIMARY}; min-width: 100px;")
+            msg = QLabel(c["message"])
+            msg.setStyleSheet(f"font-size: {Theme.FONT_MD}; color: {icon_color};")
+            msg.setWordWrap(True)
+            row.addWidget(icon)
+            row.addWidget(name)
+            row.addWidget(msg, 1)
+            layout.addLayout(row)
+            if not c["ok"]:
+                all_ok = False
+
+        layout.addSpacing(8)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 28px;
+                border: none;
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+                font-size: {Theme.FONT_MD};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Theme.BG_ACCENT_HOVER}; }}
+        """)
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Whisper Subtitle Studio")
+        self.setWindowTitle("easywhisper")
+        self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self._working_root = Path.cwd() / "work"
         self._thread = None
         self._worker = None
 
         self._stack = QStackedWidget(self)
+        self._stack.setStyleSheet(f"QStackedWidget {{ background: {Theme.BG_PAGE}; }}")
         self.setCentralWidget(self._stack)
+        self.setStyleSheet(f"QMainWindow {{ background: {Theme.BG_PAGE}; }}")
 
         self._welcome_page = self._build_welcome()
         self._processing_page = self._build_processing()
@@ -140,76 +486,133 @@ class MainWindow(QMainWindow):
         menu.addAction("Export Video\u2026").triggered.connect(self._export_video)
         self._export_action = menu.actions()[-1]
 
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("System Check\u2026").triggered.connect(self._show_setup_dialog)
+
+        QCoreApplication.instance().aboutToQuit.connect(self._on_quit)
+
+        self._run_startup_check()
+
     # --- pages ---
 
     def _build_welcome(self):
         page = QWidget()
         page.setObjectName("welcome")
         page.setStyleSheet(
-            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+            f"#welcome {{ border: 2px dashed {Theme.BORDER}; border-radius: {Theme.RADIUS_XL}; margin: 24px; background: {Theme.BG_SURFACE}; }}"
         )
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(0)
 
-        title = QLabel("Whisper Subtitle Studio")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; border: none;")
+        title = QLabel("easywhisper")
+        title.setStyleSheet(
+            f"font-size: {Theme.FONT_2XL}; font-weight: 700; color: {Theme.TEXT_PRIMARY}; border: none; letter-spacing: -0.5px;"
+        )
 
         desc = QLabel(
             "Transcribe video into editable subtitles.\n"
             "Runs locally. No uploads, no API keys."
         )
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc.setStyleSheet("border: none;")
+        desc.setStyleSheet(f"font-size: {Theme.FONT_LG}; color: {Theme.TEXT_MUTED}; border: none; margin-top: 8px;")
 
         steps = QLabel(
             "\u2003\u2460 Pick a video file\n"
-            "\u2003\u2461 Auto-transcribe\n"
-            "\u2003\u2462 Edit timestamps and text\n"
-            "\u2003\u2463 Save SRT"
+            "\u2003\u2461 Choose model and language\n"
+            "\u2003\u2462 Auto-transcribe\n"
+            "\u2003\u2463 Edit timestamps and text\n"
+            "\u2003\u2464 Save SRT"
         )
-        steps.setStyleSheet("line-height: 1.6; border: none;")
+        steps.setStyleSheet(f"line-height: 1.8; color: {Theme.TEXT_SECONDARY}; border: none; font-size: {Theme.FONT_LG};")
 
         drop_label = QLabel("Drag and drop a video file here")
         drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_label.setStyleSheet(
-            "color: #888; font-size: 14px; border: none;"
-        )
+        drop_label.setStyleSheet(f"color: {Theme.TEXT_MUTED}; font-size: {Theme.FONT_LG}; border: none;")
 
         btn = QPushButton("Choose Video")
         btn.setMinimumHeight(44)
         btn.clicked.connect(self._open_video)
-        btn.setStyleSheet("border: 1px solid #888; border-radius: 4px;")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS_LG};
+                padding: 12px 32px;
+                font-size: {Theme.FONT_LG};
+                font-weight: 600;
+                color: {Theme.TEXT_PRIMARY};
+                background: {Theme.BG_SURFACE};
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_HOVER};
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+        """)
+
+        self._welcome_status = QLabel()
+        self._welcome_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._welcome_status.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; border: none; margin-top: 8px;")
 
         layout.addStretch()
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(8)
+        layout.addSpacing(12)
         layout.addWidget(desc, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(24)
+        layout.addSpacing(32)
         layout.addWidget(steps, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(24)
+        layout.addSpacing(32)
         layout.addWidget(drop_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(8)
+        layout.addSpacing(12)
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(12)
+        layout.addWidget(self._welcome_status, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
 
         return page
 
     def _build_processing(self):
         page = QWidget()
+        page.setStyleSheet(f"background: {Theme.BG_SURFACE};")
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._progress_label = QLabel("Starting\u2026")
         self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._progress_label.setStyleSheet("font-size: 16px;")
+        self._progress_label.setStyleSheet(f"font-size: 16px; color: {Theme.TEXT_PRIMARY};")
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setFixedWidth(400)
+        self._progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_PAGE};
+                font-size: {Theme.FONT_SM};
+                color: {Theme.TEXT_MUTED};
+                height: 16px;
+            }}
+            QProgressBar::chunk {{
+                background: {Theme.BG_ACCENT};
+                border-radius: 5px;
+            }}
+        """)
 
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(self._cancel_transcription)
+        cancel.setStyleSheet(f"""
+            QPushButton {{
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                padding: 8px 20px;
+                font-size: {Theme.FONT_MD};
+                color: {Theme.TEXT_SECONDARY};
+                background: {Theme.BG_SURFACE};
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_HOVER};
+            }}
+        """)
 
         layout.addStretch()
         layout.addWidget(self._progress_label, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -228,6 +631,17 @@ class MainWindow(QMainWindow):
         self._player.setVideoOutput(video)
         self._play = QPushButton("Play", self)
         self._play.clicked.connect(self._toggle_play)
+        self._play.setStyleSheet(f"""
+            QPushButton {{
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                padding: 6px 16px;
+                font-size: {Theme.FONT_MD};
+                color: {Theme.TEXT_PRIMARY};
+                background: {Theme.BG_SURFACE};
+            }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+        """)
         self._slider = QSlider(Qt.Orientation.Horizontal, self)
         self._slider.sliderMoved.connect(self._player.setPosition)
         self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
@@ -237,9 +651,10 @@ class MainWindow(QMainWindow):
         overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         overlay.setWordWrap(True)
         overlay.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 160);
+            background-color: rgba(0, 0, 0, 140);
             color: white;
             font-size: 18px;
+            font-weight: 400;
             padding: 8px 20px;
         """)
         overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -264,11 +679,33 @@ class MainWindow(QMainWindow):
         self._table.setHorizontalHeaderLabels(["#", "Start", "End", "Text"])
         self._table.setAlternatingRowColors(True)
         self._table.setWordWrap(True)
-        self._table.setStyleSheet("""
-            QTableWidget::item:selected {
-                background-color: #4CAF50;
-                color: white;
-            }
+        self._table.setStyleSheet(f"""
+            QTableWidget {{
+                border: 1px solid {Theme.BORDER};
+                gridline-color: {Theme.BORDER_LIGHT};
+            }}
+            QTableWidget::item {{
+                padding: 4px 8px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+            }}
+            QTableWidget::item:hover {{
+                background-color: {Theme.BG_HOVER};
+            }}
+            QTableWidget::item:selected:hover {{
+                background-color: {Theme.BG_ACCENT_HOVER};
+            }}
+            QHeaderView::section {{
+                background: {Theme.BG_PAGE};
+                padding: 6px 8px;
+                border: none;
+                border-bottom: 1px solid {Theme.BORDER};
+                font-weight: 600;
+                font-size: {Theme.FONT_SM};
+                color: {Theme.TEXT_MUTED};
+            }}
         """)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -281,8 +718,15 @@ class MainWindow(QMainWindow):
         split.addWidget(self._table)
         split.setStretchFactor(0, 6)
         split.setStretchFactor(1, 1)
+        split.setStyleSheet(f"""
+            QSplitter::handle {{
+                background: {Theme.BORDER};
+                height: 2px;
+            }}
+        """)
 
         page = QWidget()
+        page.setStyleSheet(f"background: {Theme.BG_SURFACE};")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(split)
@@ -295,7 +739,7 @@ class MainWindow(QMainWindow):
         self._table.setRowCount(0)
         self._stack.setCurrentIndex(0)
         self._welcome_page.setStyleSheet(
-            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+            f"#welcome {{ border: 2px dashed {Theme.BORDER}; border-radius: {Theme.RADIUS_XL}; margin: 24px; background: {Theme.BG_SURFACE}; }}"
         )
 
     # --- drag & drop ---
@@ -308,18 +752,18 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
             if self._stack.currentIndex() == 0:
                 self._welcome_page.setStyleSheet(
-                    "#welcome { border: 4px dashed #4CAF50; border-radius: 24px; margin: 20px; background-color: #f5fff5; }"
+                    f"#welcome {{ border: 2px dashed {Theme.BORDER_ACCENT}; border-radius: {Theme.RADIUS_XL}; margin: 24px; background: {Theme.BG_ACCENT_MUTED}; }}"
                 )
 
     def dragLeaveEvent(self, event):
         if self._stack.currentIndex() == 0:
             self._welcome_page.setStyleSheet(
-                "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+                f"#welcome {{ border: 2px dashed {Theme.BORDER}; border-radius: {Theme.RADIUS_XL}; margin: 24px; background: {Theme.BG_SURFACE}; }}"
             )
 
     def dropEvent(self, event):
         self._welcome_page.setStyleSheet(
-            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+            f"#welcome {{ border: 2px dashed {Theme.BORDER}; border-radius: {Theme.RADIUS_XL}; margin: 24px; background: {Theme.BG_SURFACE}; }}"
         )
         for url in event.mimeData().urls():
             if url.isLocalFile():
@@ -361,7 +805,22 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle(title)
         dialog.setMinimumWidth(460)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background: {Theme.BG_SURFACE};
+            }}
+            QPlainTextEdit {{
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_PAGE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_MD};
+                padding: 8px;
+            }}
+        """)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
         text = QPlainTextEdit(message, dialog)
         text.setReadOnly(True)
         text.setMaximumHeight(200)
@@ -369,8 +828,31 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         copy = QPushButton("Copy")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(message))
+        copy.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 20px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_SECONDARY};
+                font-size: {Theme.FONT_MD};
+            }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+        """)
         ok = QPushButton("OK")
         ok.clicked.connect(dialog.accept)
+        ok.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 24px;
+                border: none;
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+                font-size: {Theme.FONT_MD};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Theme.BG_ACCENT_HOVER}; }}
+        """)
         btn_layout.addStretch()
         btn_layout.addWidget(copy)
         btn_layout.addWidget(ok)
@@ -384,20 +866,56 @@ class MainWindow(QMainWindow):
     # --- pipeline ---
 
     def _open_video(self):
+        last_dir = self._settings.value("last_directory", "")
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Video", "", "Video (*.mp4 *.mkv *.mov *.avi *.webm);;All (*)"
+            self, "Open Video", last_dir, "Video (*.mp4 *.mkv *.mov *.avi *.webm);;All (*)"
         )
         if not path:
             return
         self._start_transcription(Path(path))
 
     def _start_transcription(self, video: Path):
+        dialog = _TranscriptionConfigDialog(self)
+        checks = check_all()
+        critical_failures = [c for c in checks if not c["ok"] and c["name"] != "faster-whisper"]
+        status_parts = []
+        for c in checks:
+            if c["ok"]:
+                status_parts.append(f'<span style="color:{Theme.TEXT_SUCCESS}">\u2713 {c["name"]}</span>')
+            else:
+                status_parts.append(f'<span style="color:{Theme.TEXT_ERROR}">\u2717 {c["name"]}</span>')
+        dialog.set_status("  ".join(status_parts))
+
+        if critical_failures:
+            names = [c["name"] for c in critical_failures]
+            dialog._start_btn.setEnabled(False)
+            dialog._start_btn.setText(f"Missing: {', '.join(names)}")
+            dialog._start_btn.setStyleSheet(f"""
+                QPushButton {{
+                    padding: 10px 28px;
+                    border: none;
+                    border-radius: {Theme.RADIUS_LG};
+                    background: {Theme.TEXT_MUTED};
+                    color: {Theme.TEXT_WHITE};
+                    font-size: {Theme.FONT_LG};
+                    font-weight: 600;
+                }}
+            """)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._settings.setValue("last_directory", str(video.parent))
+
+        model_size = dialog.model_size()
+        language = dialog.language()
+
         self._stack.setCurrentIndex(1)
         self._progress_bar.setValue(0)
         self._progress_label.setText("Starting\u2026")
 
         self._thread = QThread(self)
-        self._worker = _Worker(video, self._working_root)
+        self._worker = _Worker(video, self._working_root, model_size, language)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
@@ -418,6 +936,7 @@ class MainWindow(QMainWindow):
 
     def _on_done(self, result: Result):
         self._last_result = result
+        _log(f"Transcription complete - {len(result.subtitles)} subtitles, video loaded in player")
         self._player.setSource(QUrl.fromLocalFile(str(result.video)))
         self._table.setRowCount(len(result.subtitles))
         for row, sub in enumerate(result.subtitles):
@@ -457,8 +976,54 @@ class MainWindow(QMainWindow):
         if getattr(self, "_export_thread", None) and self._export_thread.isRunning():
             return
 
+        _log("Export video dialog opened")
         dialog = QDialog(self)
         dialog.setWindowTitle("Export Video")
+        dialog.setMinimumWidth(480)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background: {Theme.BG_SURFACE};
+            }}
+            QLabel {{
+                font-size: {Theme.FONT_MD};
+                color: {Theme.TEXT_SECONDARY};
+            }}
+            QLineEdit {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_MD};
+            }}
+            QLineEdit:focus {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+            QSpinBox {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_MD};
+                min-height: 20px;
+            }}
+            QSpinBox:focus {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+            QFontComboBox {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_MD};
+                min-height: 20px;
+            }}
+            QFontComboBox:hover {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+        """)
 
         font_combo = QFontComboBox()
         font_combo.setCurrentFont(QFont("Arial"))
@@ -469,10 +1034,37 @@ class MainWindow(QMainWindow):
 
         pos_combo = QComboBox()
         pos_combo.addItems(["Bottom", "Top"])
+        pos_combo.setStyleSheet(f"""
+            QComboBox {{
+                padding: 8px 12px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                font-size: {Theme.FONT_MD};
+                min-height: 20px;
+            }}
+            QComboBox:hover {{
+                border-color: {Theme.BORDER_ACCENT};
+            }}
+        """)
 
         default_out = video_path.with_name(video_path.stem + "_subtitled.mp4")
         output_edit = QLineEdit(str(default_out))
         browse_btn = QPushButton("Browse...")
+        browse_btn.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 16px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_SECONDARY};
+                font-size: {Theme.FONT_MD};
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_HOVER};
+            }}
+        """)
         def browse():
             p, _ = QFileDialog.getSaveFileName(dialog, "Save Video", str(default_out), "MP4 (*.mp4)")
             if p:
@@ -484,6 +1076,8 @@ class MainWindow(QMainWindow):
         path_layout.addWidget(browse_btn)
 
         form = QFormLayout(dialog)
+        form.setSpacing(12)
+        form.setContentsMargins(24, 20, 24, 20)
         form.addRow("Font:", font_combo)
         form.addRow("Size:", size_spin)
         form.addRow("Position:", pos_combo)
@@ -492,6 +1086,30 @@ class MainWindow(QMainWindow):
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btn_box.accepted.connect(dialog.accept)
         btn_box.rejected.connect(dialog.reject)
+        btn_box.setStyleSheet(f"""
+            QPushButton {{
+                padding: 8px 24px;
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_SECONDARY};
+                font-size: {Theme.FONT_MD};
+                font-weight: 500;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background: {Theme.BG_HOVER};
+            }}
+            QPushButton[text="OK"] {{
+                background: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+                border: none;
+                font-weight: 600;
+            }}
+            QPushButton[text="OK"]:hover {{
+                background: {Theme.BG_ACCENT_HOVER};
+            }}
+        """)
         form.addRow(btn_box)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -527,21 +1145,52 @@ class MainWindow(QMainWindow):
     def _on_export_done(self, path):
         self._export_action.setEnabled(True)
         self._export_temp_srt.unlink(missing_ok=True)
+        _log(f"Export done - {path}")
         self.statusBar().showMessage(f"Exported {path}", 8000)
 
     def _on_export_failed(self, message):
         self._export_action.setEnabled(True)
         self._export_temp_srt.unlink(missing_ok=True)
+        _log(f"Export failed: {message}")
         self.statusBar().clearMessage()
         self._show_error_dialog("Export failed", message)
+
+    # --- startup check ---
+
+    def _run_startup_check(self):
+        checks = check_all()
+        failures = [c for c in checks if not c["ok"]]
+        if not failures:
+            self._welcome_status.setText("System ready \u2713")
+            self._welcome_status.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_SUCCESS}; border: none; margin-top: 8px;")
+            return
+        names = [c["name"] for c in failures]
+        self._welcome_status.setText(f"Setup issue: {', '.join(names)} \u2717  (Help \u2192 System Check)")
+        self._welcome_status.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_ERROR}; border: none; margin-top: 8px;")
+        if any(c["name"] == "ffmpeg" for c in failures):
+            self.statusBar().showMessage("ffmpeg not found. Install ffmpeg and restart.", 15000)
+
+    def _show_setup_dialog(self):
+        dialog = _SetupDialog(self)
+        dialog.exec()
+
+    # --- persistence ---
+
+    def _on_quit(self):
+        self._settings.sync()
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    QFontDatabase.addApplicationFont(str(_FONT_PATH))
-    app.setFont(QFont("Raleway"))
+    font_id = QFontDatabase.addApplicationFont(str(_FONT_PATH))
+    if font_id >= 0:
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        family = families[0] if families else "Segoe UI"
+    else:
+        family = "Segoe UI"
+    app.setFont(QFont(family, 13))
     window = MainWindow()
-    window.resize(1200, 700)
+    window.resize(1200, 720)
     window.show()
     return app.exec()
 
