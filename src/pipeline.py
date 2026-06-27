@@ -35,23 +35,28 @@ def transcribe_video(video_path, engine, working_root, *, audio_extractor=extrac
     work = Path(working_root) / video_path.stem
     work.mkdir(parents=True, exist_ok=True)
 
-    _report("Copying video...", 15)
+    _report("Copying video...", 5)
     _log("Copying video to working directory...")
     video = work / video_path.name
     shutil.copy2(video_path, video)
     _log(f"  Copied to {video}")
 
-    _report("Extracting audio...", 30)
+    _report("Extracting audio...", 10)
     _log("Extracting audio (16 kHz mono WAV)...")
     audio = work / (video.stem + ".wav")
     audio_extractor(video, audio)
     _log(f"  Audio extracted: {audio}")
 
-    _report("Transcribing...", 65)
+    _report("Transcribing...", 15)
     _log("Transcribing with Whisper...")
-    subtitles = engine.transcribe(audio)
+    
+    def _transcribe_progress(pct, msg="Transcribing..."):
+        overall_pct = 15 + int(pct * 0.8)
+        _report(msg, overall_pct)
 
-    _report("Writing subtitles...", 90)
+    subtitles = engine.transcribe(audio, progress_callback=_transcribe_progress)
+
+    _report("Writing subtitles...", 98)
     _log(f"Writing {len(subtitles)} subtitles to SRT...")
     srt_path = work / (video.stem + ".srt")
     write_srt(srt_path, subtitles)

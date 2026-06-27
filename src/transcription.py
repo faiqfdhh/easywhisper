@@ -19,7 +19,7 @@ class FasterWhisperEngine:
         self._compute_type = compute_type
         self._model = None
 
-    def transcribe(self, audio_path: Path) -> list[srt.Subtitle]:
+    def transcribe(self, audio_path: Path, progress_callback=None) -> list[srt.Subtitle]:
         if self._model is None:
             from time import perf_counter
 
@@ -55,5 +55,9 @@ class FasterWhisperEngine:
             )
             if i % 10 == 0 or i == 1:
                 _log(f"  Processed segment {i}")
+            if progress_callback and info.duration > 0:
+                m, sec = divmod(int(s.end), 60)
+                time_str = f"{m}:{sec:02d}"
+                progress_callback(min(100, int((s.end / info.duration) * 100)), f"Transcribing segment {i} ({time_str})")
         _log(f"  Done - {len(subtitles)} segments extracted")
         return subtitles

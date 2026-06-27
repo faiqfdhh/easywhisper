@@ -8,16 +8,19 @@ from pathlib import Path
 import srt
 
 _FONT_PATH = Path(__file__).parent / "fonts" / "Raleway-VariableFont_wght.ttf"
+_ARROW_PATH = Path(__file__).parent / "down-arrow.svg"
 _VIDEO_EXTS = frozenset({".mp4", ".mkv", ".mov", ".avi", ".webm"})
-from PySide6.QtCore import QCoreApplication, QObject, QSettings, QThread, QUrl, Qt, Signal
-from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtCore import QCoreApplication, QObject, QSettings, QThread, QUrl, Qt, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QFont, QFontDatabase, QAction, QShortcut, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QCompleter,
     QDialog,
+    QMenu,
     QDialogButtonBox,
     QFileDialog,
     QFontComboBox,
@@ -57,31 +60,31 @@ def _log(msg: str):
 
 
 class Theme:
-    BG_PAGE = "#f8f8f6"
-    BG_SURFACE = "#ffffff"
-    BG_HOVER = "#f0efeb"
-    BG_ACCENT = "#059669"
-    BG_ACCENT_HOVER = "#047857"
-    BG_ACCENT_MUTED = "#ecfdf5"
-    BG_TABLE_ALT = "#fafaf9"
-    TEXT_PRIMARY = "#1c1917"
-    TEXT_SECONDARY = "#57534e"
-    TEXT_MUTED = "#a8a29e"
+    BG_PAGE = "#0a0a0a"
+    BG_SURFACE = "#171717"
+    BG_HOVER = "#262626"
+    BG_ACCENT = "#3b82f6"
+    BG_ACCENT_HOVER = "#2563eb"
+    BG_ACCENT_MUTED = "#1e3a8a"
+    BG_TABLE_ALT = "#0f0f0f"
+    TEXT_PRIMARY = "#f5f5f5"
+    TEXT_SECONDARY = "#a3a3a3"
+    TEXT_MUTED = "#737373"
     TEXT_WHITE = "#ffffff"
-    TEXT_SUCCESS = "#16a34a"
-    TEXT_ERROR = "#dc2626"
-    BORDER = "#e7e5e4"
-    BORDER_LIGHT = "#f0efeb"
-    BORDER_ACCENT = "#059669"
-    RADIUS = "6px"
-    RADIUS_LG = "8px"
+    TEXT_SUCCESS = "#22c55e"
+    TEXT_ERROR = "#ef4444"
+    BORDER = "#262626"
+    BORDER_LIGHT = "#171717"
+    BORDER_ACCENT = "#3b82f6"
+    RADIUS = "8px"
+    RADIUS_LG = "12px"
     RADIUS_XL = "24px"
-    FONT_XS = "11px"
-    FONT_SM = "12px"
-    FONT_MD = "13px"
-    FONT_LG = "14px"
-    FONT_XL = "18px"
-    FONT_2XL = "24px"
+    FONT_XS = "8pt"
+    FONT_SM = "9pt"
+    FONT_MD = "10pt"
+    FONT_LG = "11pt"
+    FONT_XL = "14pt"
+    FONT_2XL = "18pt"
 
 
 class _CancelledError(Exception):
@@ -181,7 +184,6 @@ class _TranscriptionConfigDialog(QDialog):
         self._selected_language: str | None = None
 
         self._build_ui()
-        self._populate_model_details()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -193,64 +195,6 @@ class _TranscriptionConfigDialog(QDialog):
             f"font-size: {Theme.FONT_XL}; font-weight: 700; color: {Theme.TEXT_PRIMARY}; letter-spacing: -0.3px;"
         )
         layout.addWidget(title)
-
-        model_section = QVBoxLayout()
-        model_section.setSpacing(8)
-
-        model_label = QLabel("Model")
-        model_label.setStyleSheet(
-            f"font-size: {Theme.FONT_XS}; font-weight: 600; color: {Theme.TEXT_MUTED}; "
-            "text-transform: uppercase; letter-spacing: 0.5px;"
-        )
-        model_section.addWidget(model_label)
-
-        self._model_combo = QComboBox()
-        for key, spec in MODEL_SPECS.items():
-            label = f"{key} ({spec['parameters']} params, {spec['speed']} speed)"
-            self._model_combo.addItem(label, key)
-        self._model_combo.setStyleSheet(f"""
-            QComboBox {{
-                padding: 8px 12px;
-                border: 1px solid {Theme.BORDER};
-                border-radius: {Theme.RADIUS};
-                background: {Theme.BG_SURFACE};
-                color: {Theme.TEXT_PRIMARY};
-                font-size: {Theme.FONT_LG};
-                min-height: 20px;
-            }}
-            QComboBox:hover {{
-                border-color: {Theme.BORDER_ACCENT};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 28px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {Theme.BG_SURFACE};
-                color: {Theme.TEXT_PRIMARY};
-                selection-background-color: {Theme.BG_ACCENT};
-                selection-color: {Theme.TEXT_WHITE};
-                border: 1px solid {Theme.BORDER};
-                outline: none;
-            }}
-        """)
-        self._model_combo.currentIndexChanged.connect(self._populate_model_details)
-        model_section.addWidget(self._model_combo)
-
-        self._model_details = QLabel()
-        self._model_details.setWordWrap(True)
-        self._model_details.setStyleSheet(f"""
-            background: {Theme.BG_PAGE};
-            border: 1px solid {Theme.BORDER};
-            border-radius: {Theme.RADIUS_LG};
-            padding: 12px 16px;
-            font-size: {Theme.FONT_MD};
-            color: {Theme.TEXT_SECONDARY};
-            line-height: 1.5;
-        """)
-        model_section.addWidget(self._model_details)
-
-        layout.addLayout(model_section)
 
         lang_section = QVBoxLayout()
         lang_section.setSpacing(8)
@@ -266,10 +210,16 @@ class _TranscriptionConfigDialog(QDialog):
         self._lang_combo.setEditable(True)
         self._lang_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._lang_combo.setPlaceholderText("Type to filter or select a language...")
-        self._lang_combo.addItem("Auto-detect (default)", None)
+        self._lang_combo.addItem("Auto-detect", None)
         self._lang_combo.insertSeparator(1)
-        for code, name in SORTED_LANGUAGES:
+        english_idx = -1
+        for i, (code, name) in enumerate(SORTED_LANGUAGES, start=2):
             self._lang_combo.addItem(f"{name} ({code})", code)
+            if code == "en":
+                english_idx = i
+        
+        if english_idx >= 0:
+            self._lang_combo.setCurrentIndex(english_idx)
         self._lang_combo.setStyleSheet(f"""
             QComboBox {{
                 padding: 8px 12px;
@@ -287,6 +237,11 @@ class _TranscriptionConfigDialog(QDialog):
                 border: none;
                 width: 28px;
             }}
+            QComboBox::down-arrow {{
+                image: url({_ARROW_PATH.as_posix()});
+                width: 16px;
+                height: 16px;
+            }}
             QComboBox QAbstractItemView {{
                 background: {Theme.BG_SURFACE};
                 color: {Theme.TEXT_PRIMARY};
@@ -297,6 +252,20 @@ class _TranscriptionConfigDialog(QDialog):
             }}
         """)
         lang_section.addWidget(self._lang_combo)
+
+        completer = self._lang_combo.completer()
+        if completer:
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            completer.popup().setStyleSheet(f"""
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                selection-background-color: {Theme.BG_ACCENT};
+                selection-color: {Theme.TEXT_WHITE};
+                border: 1px solid {Theme.BORDER};
+                outline: none;
+            """)
 
         lang_hint = QLabel("Specifying a language can improve transcription accuracy")
         lang_hint.setStyleSheet(f"font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED}; margin-top: -2px;")
@@ -352,33 +321,13 @@ class _TranscriptionConfigDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-    def _populate_model_details(self):
-        idx = self._model_combo.currentIndex()
-        key = self._model_combo.itemData(idx)
-        spec = MODEL_SPECS[key]
 
-        variant_parts = [
-            f"English-only: {spec['en_only']}" if spec["en_only"] else "English-only: \u2014",
-            f"Multilingual: {spec['multilingual']}",
-        ]
-
-        html = (
-            f'<div style="display: flex; gap: 16px; margin-bottom: 8px;">'
-            f'  <span><strong>{spec["parameters"]}</strong> params</span>'
-            f'  <span><strong>{spec["vram"]}</strong> VRAM</span>'
-            f'  <span><strong>{spec["speed"]}</strong> relative speed</span>'
-            f'</div>'
-            f'<div style="color: {Theme.TEXT_SECONDARY}; margin-bottom: 6px;">{spec["description"]}</div>'
-            f'<div style="font-size: {Theme.FONT_SM}; color: {Theme.TEXT_MUTED};">{" &middot; ".join(variant_parts)}</div>'
-        )
-        self._model_details.setText(html)
 
     def set_status(self, html: str):
         self._status_label.setText(html)
 
     def model_size(self) -> str:
-        idx = self._model_combo.currentIndex()
-        return self._model_combo.itemData(idx)
+        return "turbo"
 
     def language(self) -> str | None:
         idx = self._lang_combo.currentIndex()
@@ -407,7 +356,7 @@ class _SetupDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
 
         title = QLabel("System Check")
-        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {Theme.TEXT_PRIMARY};")
+        title.setStyleSheet(f"font-size: 12pt; font-weight: 700; color: {Theme.TEXT_PRIMARY};")
         layout.addWidget(title)
 
         self._checks = check_all()
@@ -417,7 +366,7 @@ class _SetupDialog(QDialog):
             icon_color = Theme.TEXT_SUCCESS if c["ok"] else Theme.TEXT_ERROR
             icon = QLabel("\u2713" if c["ok"] else "\u2717")
             icon.setStyleSheet(
-                f"font-size: 16px; color: {icon_color}; font-weight: bold;"
+                f"font-size: 12pt; color: {icon_color}; font-weight: bold;"
             )
             name = QLabel(c["name"])
             name.setStyleSheet(f"font-size: {Theme.FONT_MD}; font-weight: 600; color: {Theme.TEXT_PRIMARY}; min-width: 100px;")
@@ -577,7 +526,7 @@ class MainWindow(QMainWindow):
 
         self._progress_label = QLabel("Starting\u2026")
         self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._progress_label.setStyleSheet(f"font-size: 16px; color: {Theme.TEXT_PRIMARY};")
+        self._progress_label.setStyleSheet(f"font-size: 12pt; color: {Theme.TEXT_PRIMARY};")
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
@@ -589,7 +538,8 @@ class MainWindow(QMainWindow):
                 border-radius: {Theme.RADIUS};
                 background: {Theme.BG_PAGE};
                 font-size: {Theme.FONT_SM};
-                color: {Theme.TEXT_MUTED};
+                color: {Theme.TEXT_PRIMARY};
+                text-align: center;
                 height: 16px;
             }}
             QProgressBar::chunk {{
@@ -628,6 +578,8 @@ class MainWindow(QMainWindow):
         self._player = QMediaPlayer(self)
         self._player.setAudioOutput(QAudioOutput(self))
         video = QVideoWidget(self)
+        video.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        video.customContextMenuRequested.connect(self._show_video_context_menu)
         self._player.setVideoOutput(video)
         self._play = QPushButton("Play", self)
         self._play.clicked.connect(self._toggle_play)
@@ -647,33 +599,45 @@ class MainWindow(QMainWindow):
         self._player.durationChanged.connect(lambda d: self._slider.setRange(0, d))
         self._player.positionChanged.connect(self._on_position)
 
-        overlay = QLabel(self)
+        overlay = QLabel(video)
         overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         overlay.setWordWrap(True)
         overlay.setStyleSheet("""
             background-color: rgba(0, 0, 0, 140);
             color: white;
-            font-size: 18px;
+            font-size: 14pt;
             font-weight: 400;
             padding: 8px 20px;
         """)
         overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._subtitle_label = overlay
 
-        container = QWidget()
-        grid = QGridLayout(container)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.addWidget(video, 0, 0)
-        grid.addWidget(self._subtitle_label, 0, 0, Qt.AlignmentFlag.AlignBottom)
+        video_layout = QVBoxLayout(video)
+        video_layout.setContentsMargins(0, 0, 0, 30)
+        video_layout.addStretch()
+        video_layout.addWidget(self._subtitle_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.addWidget(container, 1)
+        top_layout.addWidget(video, 1)
         controls = QHBoxLayout()
         controls.addWidget(self._play)
         controls.addWidget(self._slider)
+
+        self._time_label = QLabel("00:00:00.000 / 00:00:00.000", self)
+        self._time_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-size: {Theme.FONT_MD}; font-family: monospace;")
+        self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        controls.addWidget(self._time_label)
+
         top_layout.addLayout(controls)
+
+        space_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        space_shortcut.activated.connect(self._toggle_play)
+        left_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        left_shortcut.activated.connect(lambda: self._player.setPosition(max(0, self._player.position() - 5000)))
+        right_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        right_shortcut.activated.connect(lambda: self._player.setPosition(min(self._player.duration(), self._player.position() + 5000)))
 
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["#", "Start", "End", "Text"])
@@ -683,6 +647,8 @@ class MainWindow(QMainWindow):
             QTableWidget {{
                 border: 1px solid {Theme.BORDER};
                 gridline-color: {Theme.BORDER_LIGHT};
+                background: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
             }}
             QTableWidget::item {{
                 padding: 4px 8px;
@@ -712,6 +678,7 @@ class MainWindow(QMainWindow):
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._table.cellClicked.connect(self._seek_to_row)
+        self._table.itemChanged.connect(self._on_table_edit)
 
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(top)
@@ -775,6 +742,57 @@ class MainWindow(QMainWindow):
 
     # --- player handlers ---
 
+    def _show_video_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {Theme.BG_SURFACE};
+                color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.BORDER};
+                border-radius: {Theme.RADIUS};
+                padding: 4px 0;
+            }}
+            QMenu::item {{
+                padding: 6px 24px 6px 16px;
+                font-size: {Theme.FONT_MD};
+            }}
+            QMenu::item:selected {{
+                background-color: {Theme.BG_ACCENT};
+                color: {Theme.TEXT_WHITE};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {Theme.BORDER};
+                margin: 4px 0;
+            }}
+        """)
+
+        jump_back = QAction("Jump Back 5s", self)
+        jump_back.triggered.connect(lambda: self._player.setPosition(max(0, self._player.position() - 5000)))
+        menu.addAction(jump_back)
+
+        jump_forward = QAction("Jump Forward 5s", self)
+        jump_forward.triggered.connect(lambda: self._player.setPosition(min(self._player.duration(), self._player.position() + 5000)))
+        menu.addAction(jump_forward)
+
+        menu.addSeparator()
+
+        speed_menu = menu.addMenu("Playback Speed")
+        speed_menu.setStyleSheet(menu.styleSheet())
+        
+        rates = [0.5, 1.0, 1.25, 1.5, 2.0]
+        current_rate = self._player.playbackRate()
+        for r in rates:
+            label = f"{r}x" if r != 1.0 else "1.0x (Normal)"
+            action = QAction(label, self)
+            action.setCheckable(True)
+            if abs(current_rate - r) < 0.01:
+                action.setChecked(True)
+            action.triggered.connect(lambda checked, rate=r: self._player.setPlaybackRate(rate))
+            speed_menu.addAction(action)
+
+        menu.exec(self.sender().mapToGlobal(pos))
+
     def _toggle_play(self):
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self._player.pause()
@@ -783,8 +801,16 @@ class MainWindow(QMainWindow):
             self._player.play()
             self._play.setText("Pause")
 
+    def _format_time(self, ms: int) -> str:
+        s, ms = divmod(ms, 1000)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
     def _on_position(self, position_ms):
         self._slider.setValue(position_ms)
+        duration_ms = self._player.duration()
+        self._time_label.setText(f"{self._format_time(position_ms)} / {self._format_time(duration_ms)}")
         seconds = position_ms / 1000
         found = False
         for row in range(self._table.rowCount()):
@@ -932,23 +958,45 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, stage: str, pct: int):
         self._progress_label.setText(stage)
-        self._progress_bar.setValue(pct)
+        if not hasattr(self, "_progress_anim"):
+            self._progress_anim = QPropertyAnimation(self._progress_bar, b"value")
+            self._progress_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        
+        self._progress_anim.stop()
+        self._progress_anim.setDuration(10000)
+        self._progress_anim.setStartValue(self._progress_bar.value())
+        self._progress_anim.setEndValue(pct)
+        self._progress_anim.start()
 
     def _on_done(self, result: Result):
         self._last_result = result
         _log(f"Transcription complete - {len(result.subtitles)} subtitles, video loaded in player")
         self._player.setSource(QUrl.fromLocalFile(str(result.video)))
+        self._table.blockSignals(True)
         self._table.setRowCount(len(result.subtitles))
         for row, sub in enumerate(result.subtitles):
             self._table.setItem(row, 0, QTableWidgetItem(str(sub.index)))
             self._table.setItem(row, 1, QTableWidgetItem(srt.timedelta_to_srt_timestamp(sub.start)))
             self._table.setItem(row, 2, QTableWidgetItem(srt.timedelta_to_srt_timestamp(sub.end)))
             self._table.setItem(row, 3, QTableWidgetItem(sub.content))
+        self._table.blockSignals(False)
         self._stack.setCurrentIndex(2)
 
     def _on_failed(self, message):
         self._go_home()
         self._show_error_dialog("Transcription failed", message)
+
+    def _on_table_edit(self, item):
+        if not getattr(self, "_last_result", None):
+            return
+        
+        try:
+            write_srt(self._last_result.srt, self._get_current_subtitles())
+        except Exception as e:
+            _log(f"Error saving SRT on edit: {e}")
+
+        if self._player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self._on_position(self._player.position())
 
     def _get_current_subtitles(self):
         return [
@@ -1023,6 +1071,15 @@ class MainWindow(QMainWindow):
             QFontComboBox:hover {{
                 border-color: {Theme.BORDER_ACCENT};
             }}
+            QFontComboBox::drop-down {{
+                border: none;
+                width: 28px;
+            }}
+            QFontComboBox::down-arrow {{
+                image: url({_ARROW_PATH.as_posix()});
+                width: 16px;
+                height: 16px;
+            }}
         """)
 
         font_combo = QFontComboBox()
@@ -1046,6 +1103,15 @@ class MainWindow(QMainWindow):
             }}
             QComboBox:hover {{
                 border-color: {Theme.BORDER_ACCENT};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 28px;
+            }}
+            QComboBox::down-arrow {{
+                image: url({_ARROW_PATH.as_posix()});
+                width: 16px;
+                height: 16px;
             }}
         """)
 
