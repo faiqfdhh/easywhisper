@@ -383,6 +383,8 @@ class MainWindow(QMainWindow):
         video_path = Path(self._player.source().toLocalFile())
         if not video_path.is_file():
             return
+        if getattr(self, "_export_thread", None) and self._export_thread.isRunning():
+            return
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Export Video")
@@ -429,13 +431,13 @@ class MainWindow(QMainWindow):
         font_size = size_spin.value()
         position = pos_combo.currentText().lower()
 
-        srt_path = self._working_root / "export_temp.srt"
-        srt_path.parent.mkdir(parents=True, exist_ok=True)
-        write_srt(srt_path, self._get_current_subtitles())
+        self._export_temp_srt = self._working_root / "export_temp.srt"
+        self._export_temp_srt.parent.mkdir(parents=True, exist_ok=True)
+        write_srt(self._export_temp_srt, self._get_current_subtitles())
 
         self._export_thread = QThread(self)
         self._export_worker = _ExportWorker(
-            video_path, srt_path, output_path,
+            video_path, self._export_temp_srt, output_path,
             font_name=font_name,
             font_size=font_size,
             position=position,
@@ -453,10 +455,12 @@ class MainWindow(QMainWindow):
 
     def _on_export_done(self, path):
         self._export_action.setEnabled(True)
+        self._export_temp_srt.unlink(missing_ok=True)
         self.statusBar().showMessage(f"Exported {path}", 8000)
 
     def _on_export_failed(self, message):
         self._export_action.setEnabled(True)
+        self._export_temp_srt.unlink(missing_ok=True)
         self.statusBar().clearMessage()
         QMessageBox.critical(self, "Export failed", message)
 
