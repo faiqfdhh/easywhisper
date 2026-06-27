@@ -8,9 +8,10 @@ from pathlib import Path
 
 def _escape_filter_path(p: Path) -> str:
     s = p.as_posix()
-    s = s.replace("\\", "\\\\")
     s = s.replace(":", "\\:")
     s = s.replace(",", "\\,")
+    s = s.replace(" ", "\\ ")
+    s = s.replace("'", "\\'")
     return s
 
 

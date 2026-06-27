@@ -5,8 +5,11 @@ import sys
 from pathlib import Path
 
 import srt
+
+_FONT_PATH = Path(__file__).parent / "fonts" / "Raleway-VariableFont_wght.ttf"
+_VIDEO_EXTS = frozenset({".mp4", ".mkv", ".mov", ".avi", ".webm"})
 from PySide6.QtCore import QObject, QThread, QUrl, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -24,7 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -128,6 +131,8 @@ class MainWindow(QMainWindow):
 
         self._stack.setCurrentIndex(0)
 
+        self.setAcceptDrops(True)
+
         menu = self.menuBar().addMenu("&File")
         menu.addAction("Open Video\u2026").triggered.connect(self._open_video)
         menu.addAction("New Video").triggered.connect(self._go_home)
@@ -139,17 +144,22 @@ class MainWindow(QMainWindow):
 
     def _build_welcome(self):
         page = QWidget()
+        page.setObjectName("welcome")
+        page.setStyleSheet(
+            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+        )
         layout = QVBoxLayout(page)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         title = QLabel("Whisper Subtitle Studio")
-        title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        title.setStyleSheet("font-size: 22px; font-weight: bold; border: none;")
 
         desc = QLabel(
             "Transcribe video into editable subtitles.\n"
             "Runs locally. No uploads, no API keys."
         )
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc.setStyleSheet("border: none;")
 
         steps = QLabel(
             "\u2003\u2460 Pick a video file\n"
@@ -157,11 +167,18 @@ class MainWindow(QMainWindow):
             "\u2003\u2462 Edit timestamps and text\n"
             "\u2003\u2463 Save SRT"
         )
-        steps.setStyleSheet("line-height: 1.6;")
+        steps.setStyleSheet("line-height: 1.6; border: none;")
+
+        drop_label = QLabel("Drag and drop a video file here")
+        drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drop_label.setStyleSheet(
+            "color: #888; font-size: 14px; border: none;"
+        )
 
         btn = QPushButton("Choose Video")
         btn.setMinimumHeight(44)
         btn.clicked.connect(self._open_video)
+        btn.setStyleSheet("border: 1px solid #888; border-radius: 4px;")
 
         layout.addStretch()
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -169,7 +186,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(desc, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addSpacing(24)
         layout.addWidget(steps, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(32)
+        layout.addSpacing(24)
+        layout.addWidget(drop_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addSpacing(8)
         layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
 
@@ -275,6 +294,40 @@ class MainWindow(QMainWindow):
         self._player.setSource(QUrl())
         self._table.setRowCount(0)
         self._stack.setCurrentIndex(0)
+        self._welcome_page.setStyleSheet(
+            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+        )
+
+    # --- drag & drop ---
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+            url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in _VIDEO_EXTS
+            for url in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+            if self._stack.currentIndex() == 0:
+                self._welcome_page.setStyleSheet(
+                    "#welcome { border: 4px dashed #4CAF50; border-radius: 24px; margin: 20px; background-color: #f5fff5; }"
+                )
+
+    def dragLeaveEvent(self, event):
+        if self._stack.currentIndex() == 0:
+            self._welcome_page.setStyleSheet(
+                "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+            )
+
+    def dropEvent(self, event):
+        self._welcome_page.setStyleSheet(
+            "#welcome { border: 3px dashed #aaa; border-radius: 24px; margin: 20px; }"
+        )
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                p = Path(url.toLocalFile())
+                if p.suffix.lower() in _VIDEO_EXTS:
+                    self._start_transcription(p)
+                    event.acceptProposedAction()
+                    return
 
     # --- player handlers ---
 
@@ -303,6 +356,26 @@ class MainWindow(QMainWindow):
                 break
         if not found:
             self._subtitle_label.clear()
+
+    def _show_error_dialog(self, title: str, message: str):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(message, dialog)
+        text.setReadOnly(True)
+        text.setMaximumHeight(200)
+        layout.addWidget(text)
+        btn_layout = QHBoxLayout()
+        copy = QPushButton("Copy")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(message))
+        ok = QPushButton("OK")
+        ok.clicked.connect(dialog.accept)
+        btn_layout.addStretch()
+        btn_layout.addWidget(copy)
+        btn_layout.addWidget(ok)
+        layout.addLayout(btn_layout)
+        dialog.exec()
 
     def _seek_to_row(self, row, _column):
         start = srt.srt_timestamp_to_timedelta(self._table.item(row, 1).text())
@@ -344,6 +417,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(pct)
 
     def _on_done(self, result: Result):
+        self._last_result = result
         self._player.setSource(QUrl.fromLocalFile(str(result.video)))
         self._table.setRowCount(len(result.subtitles))
         for row, sub in enumerate(result.subtitles):
@@ -355,7 +429,7 @@ class MainWindow(QMainWindow):
 
     def _on_failed(self, message):
         self._go_home()
-        QMessageBox.critical(self, "Transcription failed", message)
+        self._show_error_dialog("Transcription failed", message)
 
     def _get_current_subtitles(self):
         return [
@@ -371,11 +445,8 @@ class MainWindow(QMainWindow):
     def _save_srt(self):
         if self._stack.currentIndex() != 2:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Save SRT", "subtitles.srt", "SubRip (*.srt)")
-        if not path:
-            return
-        write_srt(Path(path), self._get_current_subtitles())
-        self.statusBar().showMessage(f"Saved {path}", 5000)
+        write_srt(self._last_result.srt, self._get_current_subtitles())
+        self.statusBar().showMessage(f"Saved {self._last_result.srt}", 5000)
 
     def _export_video(self):
         if self._stack.currentIndex() != 2:
@@ -462,11 +533,13 @@ class MainWindow(QMainWindow):
         self._export_action.setEnabled(True)
         self._export_temp_srt.unlink(missing_ok=True)
         self.statusBar().clearMessage()
-        QMessageBox.critical(self, "Export failed", message)
+        self._show_error_dialog("Export failed", message)
 
 
 def main() -> int:
     app = QApplication(sys.argv)
+    QFontDatabase.addApplicationFont(str(_FONT_PATH))
+    app.setFont(QFont("Raleway"))
     window = MainWindow()
     window.resize(1200, 700)
     window.show()
