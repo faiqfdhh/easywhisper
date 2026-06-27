@@ -11,5 +11,5 @@ work/
 *.srt
 *.wav
 .DS_Store
-docs/
+./docs/
 .remember/
